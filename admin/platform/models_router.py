@@ -591,7 +591,7 @@ def _drop_retired_rows(rows):
 
 
 def build_payload(db, *, aggregate_only: bool = False,
-                  group_id: int = 0) -> dict:
+                  group_id: int = 0, platform: str = "") -> dict:
     """模型清单（OpenAI `/v1/models` 形状）。
 
     `aggregate_only=True`：同一模型跨平台只出一条，落点交给网关调度。
@@ -615,9 +615,16 @@ def build_payload(db, *, aggregate_only: bool = False,
 
     now = time.time()
     signature = _signature(db)
-    # 缓存 key 必须带分组：否则第一个请求的过滤结果会被所有分组复用
+    # 独占平台：`platform` 是 Key 上绑定的平台（storage 名）。给了就只发这个
+    # 平台的模型 —— 之前这个参数不存在，于是一个「独占 marvis」的 Key
+    # 请求 `/v1/models` 依然拿到全平台清单：客户端里能选到别的平台的模型，
+    # 一发就被独占平台规则挡回来，用户看不出清单本身在骗人。
+    strict_platform = str(platform or "").strip().lower()
+    # 缓存 key 必须带分组和平台：否则第一个请求的过滤结果会被别人复用
     slot_key = ("agg" if aggregate_only else "full") + (":g%d" % group_id
                                                         if group_id else "")
+    if strict_platform:
+        slot_key += ":p" + strict_platform
     cached = (_cache["payload"].get(slot_key)
               if isinstance(_cache["payload"], dict) else None)
     if (cached is not None and _cache["signature"] == signature
@@ -626,6 +633,9 @@ def build_payload(db, *, aggregate_only: bool = False,
 
     query = (db.query(ModelConfig)
              .filter(ModelConfig.enabled == 1))
+    # 独占平台：同样收窄在 SQL 层，别先算全量再丢
+    if strict_platform:
+        query = query.filter(ModelConfig.platform == strict_platform)
     # 分组限制：只在 SQL 层收窄，后续逻辑完全不变
     allowed_ids = None
     if group_id:

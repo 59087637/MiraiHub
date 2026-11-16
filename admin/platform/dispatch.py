@@ -618,6 +618,20 @@ def _retired_platform_of(model: str) -> str:
     return ""
 
 
+def _pinned_model_id(db, storage: str, model: str) -> str:
+    """控制台「平台模型映射」里登记的上游 id（没有登记返回空串）。
+
+    这是**人工钉住**的一层，不是自动归一：上游真实 id 与对外名毫无字面关系时
+    （Marvis 的槽位名、各平台的内部代号），任何字符串算法都猜不出来。
+    """
+    try:
+        from admin import model_map
+
+        return model_map.upstream_for(db, storage, model)
+    except Exception:  # noqa: BLE001 - 映射层坏掉不能挡住正常转发
+        return ""
+
+
 def _model_id_for(db, storage: str, model: str) -> str:
     """把请求里的模型名映射成**目标平台自己的 model_id**。
 
@@ -629,6 +643,16 @@ def _model_id_for(db, storage: str, model: str) -> str:
     Trae 的配置里带 `:intl` 区后缀，转发前要剥掉（上游认裸名）。
     """
     from admin.model_alias import canonical_key
+
+    # 0) **人工登记的平台映射优先**（控制台「模型映射」页维护）。
+    #
+    #    自动归一只能覆盖常见写法；上游真实 id 与对外名完全无关时（Marvis 的
+    #    槽位名、各平台内部代号）必须有人能钉死这一层。放在最前面：登记了就以
+    #    登记值转发，后面的兜底一律不参与 —— 否则「映射到 A、自动归一又改成 B」
+    #    会让排查变成猜谜。
+    pinned = _pinned_model_id(db, storage, model)
+    if pinned:
+        return pinned.split(":", 1)[0] if storage == "trae" else pinned
 
     alias = canonical_key(model)
     if not alias:
@@ -1353,10 +1377,42 @@ class PlatformDispatchMiddleware:
                     # 不传这个参数就会返回全量 —— 客户端能选、调用时又被
                     # `model_not_in_group` 拦掉，用户完全不知道能用哪些。
                     _gid = int(getattr(key, "group_id", 0) or 0)
+                    # **独占平台**：绑了平台的 Key 只该看到这个平台的模型。
+                    # 之前这里只传了分组，于是「独占 marvis」的 Key 拉
+                    # `/v1/models` 依旧拿到全平台清单 —— 客户端里挑一个
+                    # 别的平台的模型，一发就被独占规则挡回去。
+                    _platform = str(getattr(key, "platform", "") or "").strip().lower()
                     with _db() as raw_db:
                         payload = models_router.build_payload(
                             raw_db, aggregate_only=aggregate_only,
-                            group_id=_gid)
+                            group_id=_gid, platform=_platform)
+                        # **下游可见名**：登记过映射的模型，清单里只发别名，
+                        # 客户端永远看不到上游真实 model_id。
+                        # 只改写已有条目、不追加拿不到的目标 —— 否则客户端
+                        # 选了会直接调不通。
+                        try:
+                            from admin import model_map as _model_map
+
+                            _mm = _model_map.load(raw_db)
+                            _pools = _mm.get("platforms") or {}
+                            _mapping = (_pools.get(_platform) or {}) if _platform else {}
+                            if not _mapping:
+                                # 通用 Key（没绑独占平台）或该平台还没单独配过：
+                                # 合并所有平台的映射。不合并的话，通用 Key 拉
+                                # `/v1/models` 依旧是一屏上游真名，映射形同白配。
+                                _mapping = {}
+                                for _one in _pools.values():
+                                    for _down, _up in (_one or {}).items():
+                                        _mapping.setdefault(_down, _up)
+                            if _mapping and _mm.get("hide_upstream", True):
+                                _rev = {str(up).strip().lower(): down
+                                        for down, up in _mapping.items()}
+                                for _item in payload.get("data") or []:
+                                    _id = str(_item.get("id") or "").strip().lower()
+                                    if _id in _rev:
+                                        _item["id"] = _rev[_id]
+                        except Exception:  # noqa: BLE001 - 映射读不到不影响清单
+                            pass
                     # **默认输出严格 OpenAI 形状**：`platform` / `platforms`
                     # 这些扩展字段会让严格解析的客户端（Rust serde / Go struct）
                     # 直接报 `error decoding response body`。

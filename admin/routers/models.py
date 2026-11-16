@@ -467,6 +467,7 @@ def _is_official_visible(model, rank_by_platform: dict) -> bool:
 
 @router.get("/aggregate")
 def list_aggregate(level: Optional[str] = None,
+                   platform: Optional[str] = None,
                    _: bool = Depends(require_admin),
                    db: Session = Depends(get_db)):
     """聚合模型列表：**同一模型跨平台合成一项**。
@@ -494,6 +495,17 @@ def list_aggregate(level: Optional[str] = None,
     query = db.query(ModelConfig)
     if level:
         query = query.filter(ModelConfig.level == level)
+    if platform:
+        # **按平台收窄**（`?platform=marvis`）。
+        #
+        # 给独占平台的密钥挑模型时必须只看这个平台的模型：以前这里无条件返回
+        # 全部平台，于是「选了 marvis」也能勾到 loomy 的模型，创建时看不出问题，
+        # 真调起来才发现模型不属于这个 key 的独占平台。
+        from admin.model_map import normalize_platform
+
+        storage = normalize_platform(platform)
+        if storage:
+            query = query.filter(ModelConfig.platform == storage)
     rows = query.order_by(ModelConfig.platform.asc(),
                           ModelConfig.model_id.asc()).all()
 

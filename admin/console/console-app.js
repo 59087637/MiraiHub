@@ -11528,7 +11528,13 @@ async function loadShareInfo() {
     // 可用模型必须**按模型聚合**：同一个模型在各平台有不同 system 名
     // （hy3 / dmodel / spark-x2.6…），平铺会把同一模型重复列好几次。
     // 这里只显示一个 chip，悬停展开各平台的具体 model_id 与倍率。
-    const r = await api("/api/models/aggregate");
+    // 独占平台：Key 表单里选了平台，就只该看到这个平台的模型。
+    // 之前无论选没选平台都拉全量，于是「独占 marvis」的 Key 下面照样列出
+    // 别的平台的模型，勾了也用不了（后端按独占平台收窄）。
+    const _keyPlatform = String(uiSelectValue("kPlatform")
+      || uiSelectValue("ekPlatform") || "").toLowerCase();
+    const r = await api("/api/models/aggregate"
+      + (_keyPlatform ? "?platform=" + encodeURIComponent(_keyPlatform) : ""));
     const { ok, data } = await safeJson(r);
     if (!ok) return;
     const groups = (data.items || []).filter(item => item.enabled_any !== false);
@@ -12037,6 +12043,9 @@ async function onKeyPlatformChange() {
   host.innerHTML = keyAccountPicker(prefix, state.accounts || [], picked, platform,
                                     state.total);
   window._keyFormState = { ...state, platform, picked };
+  // 平台换了，可用模型清单也要跟着换（模型来自 /api/models/aggregate，
+  // 按独占平台过滤）。不刷新就会出现「平台已改成 marvis，模型还是全平台」。
+  if (typeof loadShareInfo === "function") loadShareInfo();
 }
 
 /** 收集多选账号 id（从隐藏 input 读，选择器自己维护它）。 */
@@ -12783,7 +12792,11 @@ async function renderAggregatedModels() {
 
   let data = null;
   try {
-    const r = await api("/api/models/aggregate");
+    // 平台芯片选中的平台要交给后端：只取这个平台的模型，而不是拉全量
+    // 回来再在浏览器里过滤（平台一多，全量既慢又容易看不全）。
+    const _pt = String(_modelPlatformFilter || "").toLowerCase();
+    const r = await api("/api/models/aggregate"
+      + (_pt ? "?platform=" + encodeURIComponent(_pt) : ""));
     const parsed = await safeJson(r);
     if (parsed.ok) data = parsed.data;
   } catch (error) {
@@ -12983,14 +12996,106 @@ function renderModelPlatformFilter() {
     groups[key] = (groups[key] || 0) + 1;
   });
   const keys = Object.keys(groups);
-  if (keys.length <= 1) { host.innerHTML = ""; return; }  // 只有一个平台就不必显示
+  // 「上游映射」入口固定在芯片行尾：它本身就是「按平台」维度的配置。
+  // 只有一个平台时也要显示 —— 单平台网关恰恰最需要配映射。
+  const mapEntry = `<button type="button" class="model-platform-chip" onclick="openModelMapDialog()" data-tooltip="上游模型映射" data-tooltip-description="给每个平台登记「下游可见名 → 上游真实 model_id」。登记后 /v1/models 与响应体里只出现你起的名字，客户端看不到上游模型名；调用时网关自动翻译回上游 id。">上游映射</button>`;
+  if (keys.length <= 1) { host.innerHTML = mapEntry; return; }  // 只有一个平台就不必显示平台芯片
   const chip = (value, label, count) =>
     `<button type="button" class="model-platform-chip${samePlatformFamily(value, _modelPlatformFilter) ? " active" : ""}" data-platform-filter="${esc(value)}">${esc(label)}<span>${count}</span></button>`;
   const totalAll = keys.reduce((sum, key) => sum + groups[key], 0);
   host.innerHTML = chip("", "全部", totalAll) + keys.map(key => {
     const sample = (_modelData || []).find(m => (m.platform || "workbuddy") === key) || {};
     return chip(key, sample.platform_label || key, groups[key]);
-  }).join("");
+  }).join("") + mapEntry;
+}
+
+/**
+ * 「上游模型映射」对话框。
+ *
+ * 平台对同一个模型的叫法各不相同（`deepseek-v4.1-flash` / `dfmodel` /
+ * 槽位名 `main-auto`），而下游只该看到自己起的名字。这里按平台登记
+ * 「下游名 = 上游 model_id」：
+ *   · 转发时 `_model_id_for` 优先查这张表，不再靠别名归一去猜；
+ *   · `/v1/models` 与响应体 / SSE 里出现的上游名会被换成下游名。
+ */
+async function openModelMapDialog() {
+  let data = { hide_upstream: true, platforms: {} };
+  try {
+    const { ok, data: got } = await safeJson(await api("/api/model-map"));
+    if (ok && got) data = got;
+  } catch (error) {
+    toast("读取模型映射失败", "err");
+    return;
+  }
+  const specs = await clientPlatformSpecs();
+  const labels = new Map();
+  for (const item of specs || []) {
+    const storage = String(item.storage_platform || item.id || "").toLowerCase();
+    if (storage && !labels.has(storage)) labels.set(storage, item.label || storage);
+  }
+  // 已配置但平台清单里没有的也要列出来，否则配过的东西等于消失
+  for (const storage of Object.keys(data.platforms || {})) {
+    if (!labels.has(storage)) labels.set(storage, storage);
+  }
+  const toText = (mapping) => Object.entries(mapping || {})
+    .map(([down, up]) => `${down} = ${up}`).join("\n");
+  const rows = [...labels.entries()].map(([storage, label]) => `
+    <div class="mb-4">
+      <div class="text-xs text-slate-500 mb-1">${esc(label)} <span class="text-slate-400">(${esc(storage)})</span></div>
+      <textarea id="mmap-${esc(storage)}" data-platform="${esc(storage)}" rows="4" spellcheck="false"
+        placeholder="下游名 = 上游 model_id，每行一条，例如：&#10;deepseek-v4.1-flash = main-auto"
+        class="w-full text-xs font-mono border border-slate-200 rounded-lg p-2">${esc(toText((data.platforms || {})[storage]))}</textarea>
+    </div>`).join("");
+  openModal(`
+    <div class="p-6">
+      <h3 class="text-lg font-semibold mb-1">上游模型映射</h3>
+      <p class="text-xs text-slate-500 mb-4">左侧是下游看到的模型名，右侧是上游真实 model_id。留空表示该平台不做映射（沿用自动归一）。</p>
+      <label class="flex items-center gap-2 mb-4 text-sm">
+        <input type="checkbox" id="mmapHide" ${data.hide_upstream !== false ? "checked" : ""}>
+        <span>隐藏上游模型名（响应体与 /v1/models 里替换成下游名）</span>
+      </label>
+      <div class="max-h-[52vh] overflow-y-auto pr-1">${rows || '<p class="text-sm text-slate-400">没有可用平台</p>'}</div>
+      <div class="flex justify-end gap-2 mt-5">
+        <button type="button" class="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 text-sm" onclick="closeModal()">取消</button>
+        <button type="button" class="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-sm" onclick="saveModelMap(this)">保存</button>
+      </div>
+    </div>`, "max-w-2xl");
+}
+
+/** 保存模型映射：把每个 textarea 里的 `下游 = 上游` 行解析成对象。 */
+async function saveModelMap(btn) {
+  const platforms = {};
+  document.querySelectorAll("#modalBox textarea[data-platform]").forEach(node => {
+    const storage = node.dataset.platform;
+    const mapping = {};
+    node.value.split("\n").forEach(line => {
+      const text = line.trim();
+      if (!text) return;
+      const at = text.indexOf("=");
+      if (at <= 0) return;
+      const down = text.slice(0, at).trim();
+      const up = text.slice(at + 1).trim();
+      if (down && up) mapping[down] = up;
+    });
+    if (Object.keys(mapping).length) platforms[storage] = mapping;
+  });
+  const hide = document.getElementById("mmapHide");
+  if (btn) btn.disabled = true;
+  try {
+    const { ok, data } = await safeJson(await api("/api/model-map", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hide_upstream: hide ? hide.checked : true, platforms }),
+    }));
+    if (!ok) throw new Error(typeof data.detail === "string" ? data.detail : "保存失败");
+    toast("模型映射已保存");
+    closeModal();
+    renderModelPage(1);
+  } catch (error) {
+    toast(error.message || "保存失败", "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function renderModelPage(p) {

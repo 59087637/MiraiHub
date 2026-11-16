@@ -43,6 +43,8 @@ from admin.routers import agent as agent_router
 from admin.routers import mcp as mcp_router
 from admin.routers import growth_center
 from admin.routers import ip_management
+# 平台模型映射（下游名 → 上游 model_id）的读写接口：/api/model-map
+from admin.routers import model_map as model_map_router
 from admin import credit_journal  # register transactional balance observations
 from admin.routers import maintenance
 
@@ -153,6 +155,13 @@ from admin.platform.loader import load_platforms
 
 load_platforms()
 app.add_middleware(PlatformDispatchMiddleware)
+
+# 统一对外错误体（只回状态码 + 通用英文）+ 上游模型名隐藏，仅接管 `/v1/*`。
+# 必须注册在 PlatformDispatchMiddleware **之后**：`add_middleware` 是前插，
+# 后注册者在更外层，才能连 dispatch 自己产生的错误响应一起改写。
+from admin.unified_errors import UnifiedGatewayMiddleware
+
+app.add_middleware(UnifiedGatewayMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -371,6 +380,8 @@ if os.getenv("WORKBUDDY_ANDROID") == "1":
 app.include_router(accounts.router)
 app.include_router(keys.router)
 app.include_router(models.router)
+# 平台模型映射：/api/model-map（读写）+ /api/model-map/redactions（当前脱敏表）
+app.include_router(model_map_router.router)
 app.include_router(proxy.router)
 app.include_router(proxies.router)
 app.include_router(audio.router)
