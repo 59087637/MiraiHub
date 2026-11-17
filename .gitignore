@@ -172,6 +172,7 @@ tests/
 tests/*
 !tests/test_android_signing.py
 !tests/test_anthropic_tool_result_image.py
+!tests/test_anthropic_adapter_tool_result_image.py
 !tests/test_marvis_content_fingerprint.py
 !tests/test_raccoon_quota_classification.py
 !tests/test_platform_rating.py
@@ -237,3 +238,4 @@ TICKET_workbuddy_logout_p0.md
 !tests/test_marvis_oauth_exchange.py
 !tests/test_marvis_no_redirect.py
 !tests/test_marvis_input_cleared.py
+!tests/test_marvis_sticky.py
